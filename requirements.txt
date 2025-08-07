@@ -1,10 +1,12 @@
 streamlit
 pandas
 numpy
-plotly
 ta
-yfinance
-watchdog
-requests
-matplotlib
+plotly
+tvdatafeed
+selenium
+python-dotenv
 pytz
+python-telegram-bot
+backtrader
+scipy
