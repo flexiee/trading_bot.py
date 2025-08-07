@@ -9,4 +9,4 @@ pytz
 python-telegram-bot
 backtrader
 scipy
-git+https://github.com/StreamAlpha/tvdatafeed.git
+git+https://github.com/StreamAlpha/tvdatafeed.git@master
