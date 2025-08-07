@@ -6,4 +6,4 @@ plotly==5.22.0
 python-dateutil==2.9.0
 numpy==1.26.4
 pillow==10.3.0
-git+https://github.com/StreamAlpha/tvdatafeed.git
+git+https://github.com/StreamAlpha/tvdatafeed.git@master
