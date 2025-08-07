@@ -3,10 +3,10 @@ pandas
 numpy
 ta
 plotly
-tvdatafeed
 selenium
 python-dotenv
 pytz
 python-telegram-bot
 backtrader
 scipy
+git+https://github.com/StreamAlpha/tvdatafeed.git
