@@ -1,3 +1,30 @@
-[bot_settings]
+[bot]
+version = "2.0"
+theme = "dark"
+default_market = "EUR/USD"
+default_interval = "1m"
+default_risk_percent = 1.0
+min_confidence = 90
+
+[telegram]
+enable_alerts = false
+bot_token = ""
+chat_id = ""
+
+[chart]
+show_tradingview = true
+background_image = "bullbear"
+
+[ui]
+enable_watchlist = true
+enable_favorites = true
 auto_refresh = false
-risk_percent = 1
+max_history_display = 20
+
+[signal]
+high_confidence_threshold = 95
+super_confidence = 110
+rr_notification_threshold = 6
+rr_extreme_threshold = 9
+strategies = ["RSI", "EMA", "MACD", "Bollinger", "Candlestick", "Trendline", "VolumeSpike"]
+multi_timeframe_confirm = true
