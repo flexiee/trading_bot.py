@@ -1,42 +1,69 @@
-# Step 2: Basic Trading Bot with Simulated Live Price Feed
 import streamlit as st
 import pandas as pd
 import numpy as np
+from datetime import datetime, timedelta
 import time
-from datetime import datetime
 
-st.set_page_config(page_title="Live Price Trading Bot", layout="wide")
-st.title("📊 Trading Bot – Live Price (Simulated)")
+st.set_page_config(page_title="Trading Bot with RSI & EMA", layout="wide")
+st.title("📉 Trading Bot – RSI & EMA Strategy (Simulated Data)")
 
-# Sidebar - Market Selector
+# Market selection
 markets = ["EUR/USD", "GBP/JPY", "USD/JPY", "BTC/USD", "XAU/USD"]
 selected_market = st.selectbox("Select Market", markets)
 
-# Initialize session state
-if "price" not in st.session_state:
-    st.session_state.price = 100.0  # Starting price
+# Generate Simulated OHLC Data
+@st.cache_data(ttl=60)
+def generate_data():
+    now = datetime.now()
+    times = [now - timedelta(minutes=i) for i in range(60)][::-1]
+    prices = [100 + np.random.normal(0, 0.5) for _ in range(60)]
+    df = pd.DataFrame({"datetime": times, "close": prices})
+    df["open"] = df["close"].shift(1).fillna(df["close"])
+    df["high"] = df[["open", "close"]].max(axis=1) + np.random.uniform(0.1, 0.4, size=60)
+    df["low"] = df[["open", "close"]].min(axis=1) - np.random.uniform(0.1, 0.4, size=60)
+    return df
 
-# Live Price Simulator
-price_container = st.empty()
-signal_container = st.empty()
+df = generate_data()
 
-# Live update loop
-run_live = st.checkbox("🔄 Auto Update Live Price", value=True)
+# RSI calculation
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.rolling(window=period).mean()
+    avg_loss = loss.rolling(window=period).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
-if run_live:
-    for i in range(200):  # Runs for ~200 updates
-        price_change = np.random.uniform(-0.3, 0.3)  # Simulated fluctuation
-        st.session_state.price += price_change
-        st.session_state.price = round(st.session_state.price, 4)
+# EMA calculation
+def calculate_ema(series, period=14):
+    return series.ewm(span=period, adjust=False).mean()
 
-        # Signal logic
-        signal = "BUY" if price_change > 0 else "SELL"
+df["RSI"] = calculate_rsi(df["close"])
+df["EMA"] = calculate_ema(df["close"])
 
-        # Update display
-        price_container.metric(label=f"📈 Live Price: {selected_market}", value=f"${st.session_state.price}")
-        signal_container.success(f"Signal: {signal} | Time: {datetime.now().strftime('%H:%M:%S')}")
-        time.sleep(1)
+# Generate signal
+latest = df.iloc[-1]
+signal = ""
+if latest["RSI"] < 30 and latest["close"] > latest["EMA"]:
+    signal = "📈 BUY"
+elif latest["RSI"] > 70 and latest["close"] < latest["EMA"]:
+    signal = "📉 SELL"
 else:
-    st.warning("Auto-update paused. Enable checkbox to simulate live data.")
+    signal = "⚠️ WAIT"
 
-st.caption("⚙️ Simulated live market data. Next: real indicators, chart, and automation.")
+# Display metrics
+st.subheader(f"📊 {selected_market} – Signal & Indicators")
+col1, col2, col3 = st.columns(3)
+col1.metric("RSI", f"{latest['RSI']:.2f}")
+col2.metric("EMA", f"{latest['EMA']:.4f}")
+col3.metric("Price", f"{latest['close']:.4f}")
+
+st.success(f"🔔 Signal: {signal}")
+
+# Show table
+with st.expander("Show Candlestick Data"):
+    st.dataframe(df[["datetime", "open", "high", "low", "close", "RSI", "EMA"]].tail(10), use_container_width=True)
+
+st.caption("✅ RSI & EMA strategy applied. Next: Add real chart view + risk management.")
