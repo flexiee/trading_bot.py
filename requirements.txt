@@ -6,7 +6,7 @@ plotly
 selenium
 python-dotenv
 pytz
-python-telegram-bot
+python-telegram-bot==13.15
 backtrader
 scipy
-git+https://github.com/StreamAlpha/tvdatafeed.git@master
+tvdatafeed==1.0.11
