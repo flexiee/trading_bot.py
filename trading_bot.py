@@ -4,14 +4,19 @@ import numpy as np
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="Trading Bot with Chart", layout="wide")
-st.title("📉 Trading Bot – RSI & EMA Strategy (with Chart)")
+st.set_page_config(page_title="Trading Bot", layout="wide")
+st.title("🤖 Trading Bot – RSI & EMA Strategy with Risk Management")
 
-# Market selection
+# Select Market
 markets = ["EUR/USD", "GBP/JPY", "USD/JPY", "BTC/USD", "XAU/USD"]
-selected_market = st.selectbox("Select Market", markets)
+selected_market = st.selectbox("📌 Select Market", markets)
 
-# Generate Simulated OHLC Data
+# Account Settings
+st.sidebar.header("💼 Account & Risk Settings")
+account_balance = st.sidebar.number_input("Account Balance ($)", value=1000.0, step=10.0)
+risk_percent = st.sidebar.slider("Risk per Trade (%)", 0.5, 5.0, 1.0, 0.1)
+
+# Simulate OHLC Data
 @st.cache_data(ttl=60)
 def generate_data():
     now = datetime.now()
@@ -25,7 +30,7 @@ def generate_data():
 
 df = generate_data()
 
-# RSI calculation
+# Indicators
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = delta.where(delta > 0, 0.0)
@@ -36,41 +41,60 @@ def calculate_rsi(series, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
-# EMA calculation
 def calculate_ema(series, period=14):
     return series.ewm(span=period, adjust=False).mean()
 
 df["RSI"] = calculate_rsi(df["close"])
 df["EMA"] = calculate_ema(df["close"])
 
-# Generate signal
+# Signal Logic
 latest = df.iloc[-1]
-signal = ""
 entry_price = latest["close"]
-rr_ratio = 2
+rr_ratio = 2  # Risk:Reward 1:2
+signal = ""
+sl = tp = lot_size = confidence = None
 
 if latest["RSI"] < 30 and latest["close"] > latest["EMA"]:
     signal = "📈 BUY"
     sl = entry_price - 0.5
     tp = entry_price + (entry_price - sl) * rr_ratio
+    confidence = 80
 elif latest["RSI"] > 70 and latest["close"] < latest["EMA"]:
     signal = "📉 SELL"
     sl = entry_price + 0.5
     tp = entry_price - (sl - entry_price) * rr_ratio
+    confidence = 85
 else:
     signal = "⚠️ WAIT"
-    sl = tp = None
+    confidence = 50
 
-# Display metrics
-st.subheader(f"📊 {selected_market} – Signal & Indicators")
+# Risk Management
+risk_amount = (risk_percent / 100) * account_balance
+pip_value = 10 if "USD" in selected_market else 1  # Rough estimate for forex vs crypto
+if sl:
+    stop_loss_pips = abs(entry_price - sl)
+    lot_size = risk_amount / (stop_loss_pips * pip_value)
+
+# Display Signal & Metrics
+st.subheader(f"📊 {selected_market} – Signal Overview")
 col1, col2, col3 = st.columns(3)
 col1.metric("RSI", f"{latest['RSI']:.2f}")
 col2.metric("EMA", f"{latest['EMA']:.4f}")
 col3.metric("Price", f"{entry_price:.4f}")
-st.success(f"🔔 Signal: {signal}")
+st.success(f"🔔 Signal: {signal}  |  Confidence: {confidence}%")
 
-# Show chart
-st.subheader("📈 Candlestick Chart")
+if sl and tp:
+    st.info(f"""
+    💰 Entry: {entry_price:.4f}  
+    📉 SL: {sl:.4f}  
+    🎯 TP: {tp:.4f}  
+    ⚖️ Risk:Reward = 1:{rr_ratio}  
+    💵 Risk Amount: ${risk_amount:.2f}  
+    📦 Lot Size: {lot_size:.2f}
+    """)
+
+# Candlestick Chart
+st.subheader("📈 Live Candlestick Chart")
 fig = go.Figure()
 
 fig.add_trace(go.Candlestick(
@@ -81,7 +105,6 @@ fig.add_trace(go.Candlestick(
     close=df["close"],
     name="Candles"
 ))
-
 fig.add_trace(go.Scatter(
     x=df["datetime"],
     y=df["EMA"],
@@ -89,7 +112,6 @@ fig.add_trace(go.Scatter(
     name="EMA",
     line=dict(color="blue", width=1)
 ))
-
 if signal in ["📈 BUY", "📉 SELL"]:
     fig.add_hline(y=entry_price, line=dict(color="orange", dash="dash"), annotation_text="Entry")
     fig.add_hline(y=tp, line=dict(color="green", dash="dot"), annotation_text="TP")
@@ -98,8 +120,7 @@ if signal in ["📈 BUY", "📉 SELL"]:
 fig.update_layout(height=500, margin=dict(t=20, b=20))
 st.plotly_chart(fig, use_container_width=True)
 
-# Show data
-with st.expander("Show Candlestick Data"):
+with st.expander("🔍 Show Latest Data"):
     st.dataframe(df[["datetime", "open", "high", "low", "close", "RSI", "EMA"]].tail(10), use_container_width=True)
 
-st.caption("✅ Signal with TP/SL & R:R = 1:2 shown on chart. Next: Add real-time risk management & lot calculation.")
+st.caption("✅ Risk-managed trading signal. Next: Telegram alerts, signal log, multi-timeframe confirmation.")
