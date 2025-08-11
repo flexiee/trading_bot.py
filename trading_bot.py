@@ -157,3 +157,65 @@ if df is not None and not df.empty:
         st.info("No valid trade signal right now.")
 else:
     st.error("Failed to fetch market data.")
+# Function to calculate signals with multiple strategy confirmation
+def generate_signal(data):
+    if data is None or data.empty:
+        return "No data", 0, None
+
+    # --- Strategy 1: RSI + EMA Crossover ---
+    data['EMA_fast'] = ta.trend.ema_indicator(data['close'], window=9)
+    data['EMA_slow'] = ta.trend.ema_indicator(data['close'], window=21)
+    data['RSI'] = ta.momentum.rsi(data['close'], window=14)
+
+    ema_buy = data['EMA_fast'].iloc[-1] > data['EMA_slow'].iloc[-1]
+    ema_sell = data['EMA_fast'].iloc[-1] < data['EMA_slow'].iloc[-1]
+    rsi_buy = data['RSI'].iloc[-1] < 30
+    rsi_sell = data['RSI'].iloc[-1] > 70
+
+    # --- Strategy 2: MACD Confirmation ---
+    macd = ta.trend.macd_diff(data['close'])
+    macd_buy = macd.iloc[-1] > 0
+    macd_sell = macd.iloc[-1] < 0
+
+    # --- Strategy 3: Bollinger Band Bounce ---
+    bb_high = ta.volatility.bollinger_hband(data['close'], window=20)
+    bb_low = ta.volatility.bollinger_lband(data['close'], window=20)
+    bb_buy = data['close'].iloc[-1] <= bb_low.iloc[-1]
+    bb_sell = data['close'].iloc[-1] >= bb_high.iloc[-1]
+
+    # --- Combine Strategies ---
+    buy_confidence = sum([ema_buy, rsi_buy, macd_buy, bb_buy])
+    sell_confidence = sum([ema_sell, rsi_sell, macd_sell, bb_sell])
+
+    if buy_confidence >= 3:
+        return "BUY", buy_confidence * 25, data
+    elif sell_confidence >= 3:
+        return "SELL", sell_confidence * 25, data
+    else:
+        return "NO TRADE", max(buy_confidence, sell_confidence) * 25, data
+
+
+# Signal button click event
+if st.button("Generate Signal"):
+    df = get_market_data(selected_symbol, selected_interval)
+    signal, confidence, df = generate_signal(df)
+
+    if signal != "No data":
+        st.subheader(f"📊 Signal: {signal}")
+        st.write(f"✅ Confidence Level: {confidence}%")
+        st.write("📈 Chart below:")
+
+        # Plot chart
+        fig = go.Figure(data=[go.Candlestick(
+            x=df.index,
+            open=df['open'],
+            high=df['high'],
+            low=df['low'],
+            close=df['close']
+        )])
+        fig.update_layout(title=f"{selected_symbol} - {selected_interval}", xaxis_rangeslider_visible=False)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.error("No data available for this symbol and interval.")
+
+# ===================== END OF PART 2 =====================
