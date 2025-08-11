@@ -219,3 +219,74 @@ if st.button("Generate Signal"):
         st.error("No data available for this symbol and interval.")
 
 # ===================== END OF PART 2 =====================
+# ===================== PART 3 =====================
+
+# Pip value mapping (approximate per market type)
+PIP_VALUES = {
+    "forex": 10,        # $10 per pip for 1 lot
+    "crypto": 1,        # $1 per pip for 1 lot
+    "indices": 0.5,     # $0.5 per pip for 1 lot
+    "commodities": 1.5  # $1.5 per pip for 1 lot
+}
+
+# Function to detect market type
+def detect_market_type(symbol):
+    if any(curr in symbol.upper() for curr in ["USD", "EUR", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF"]):
+        return "forex"
+    elif any(coin in symbol.upper() for coin in ["BTC", "ETH", "XRP", "DOGE", "SOL"]):
+        return "crypto"
+    elif any(idx in symbol.upper() for idx in ["NIFTY", "BANKNIFTY", "SENSEX", "DOW", "SPX", "NASDAQ"]):
+        return "indices"
+    else:
+        return "commodities"
+
+# Risk management calculation
+def calculate_risk(account_balance, risk_percent, stop_loss_pips, symbol):
+    market_type = detect_market_type(symbol)
+    pip_value = PIP_VALUES[market_type]
+
+    risk_amount = (account_balance * risk_percent) / 100
+    lot_size = risk_amount / (stop_loss_pips * pip_value)
+
+    # Take Profit = Risk:Reward ratio (e.g., 1:2)
+    tp_pips = stop_loss_pips * 2
+    return {
+        "risk_amount": round(risk_amount, 2),
+        "lot_size": round(lot_size, 2),
+        "stop_loss_pips": stop_loss_pips,
+        "take_profit_pips": tp_pips
+    }
+
+# User inputs for account balance and risk %
+account_balance = st.number_input("💰 Account Balance ($)", value=1000.0, step=100.0)
+risk_percent = st.slider("📉 Risk per Trade (%)", 0.5, 5.0, 1.0)
+
+if st.button("Generate Signal with Risk Management"):
+    df = get_market_data(selected_symbol, selected_interval)
+    signal, confidence, df = generate_signal(df)
+
+    if signal != "No data":
+        stop_loss_pips = 20  # Can be dynamic based on volatility
+        rm = calculate_risk(account_balance, risk_percent, stop_loss_pips, selected_symbol)
+
+        st.subheader(f"📊 Signal: {signal}")
+        st.write(f"✅ Confidence Level: {confidence}%")
+        st.write(f"💵 Risk Amount: ${rm['risk_amount']}")
+        st.write(f"📏 Lot Size: {rm['lot_size']} lots")
+        st.write(f"⛔ Stop Loss: {rm['stop_loss_pips']} pips")
+        st.write(f"🎯 Take Profit: {rm['take_profit_pips']} pips")
+        st.write("📈 Chart below:")
+
+        fig = go.Figure(data=[go.Candlestick(
+            x=df.index,
+            open=df['open'],
+            high=df['high'],
+            low=df['low'],
+            close=df['close']
+        )])
+        fig.update_layout(title=f"{selected_symbol} - {selected_interval}", xaxis_rangeslider_visible=False)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.error("No data available for this symbol and interval.")
+
+# ===================== END OF PART 3 =====================
