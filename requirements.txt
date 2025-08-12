@@ -1,5 +1,5 @@
 streamlit
-yfinance
+tvdatafeed
 pandas
 numpy
-plotly
+ta
