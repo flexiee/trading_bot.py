@@ -1,6 +1,11 @@
-streamlit==1.26.0
+streamlit
 pandas
 numpy
-yfinance
-matplotlib
-ta
+selenium
+requests
+beautifulsoup4
+tradingview_ta
+pytz
+tvdatafeed
+Pillow
+plotly
