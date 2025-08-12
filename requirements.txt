@@ -1,5 +1,9 @@
 streamlit
-tvdatafeed
 pandas
 numpy
 ta
+tvDatafeed
+selenium
+pillow
+python-telegram-bot
+requests
