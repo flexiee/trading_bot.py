@@ -1,566 +1,219 @@
-# trading_bot.py
-import os
-import io
-import time
-from datetime import datetime, timedelta
-import base64
-
+# trading_bot_streamlit.py
+# Cloud-friendly single-file trading signal app (no Selenium). Copy-paste into your Streamlit app.
+import streamlit as st
+import yfinance as yf
 import pandas as pd
 import numpy as np
-import yfinance as yf
-import matplotlib.pyplot as plt
+import os
+from datetime import datetime
+import io, base64
 
-import streamlit as st
+st.set_page_config(page_title="Pro Signal Bot (Cloud)", layout="wide", initial_sidebar_state="expanded")
 
-# Use TA indicators helper (if installed). If not, simple implementations are provided below.
-try:
-    import ta
-    TA_AVAILABLE = True
-except Exception:
-    TA_AVAILABLE = False
-
-# ---------------------------
-# Configuration / Symbols
-# ---------------------------
-
-# Map friendly name -> (tradingview_symbol, yfinance_ticker, market_type)
-# market_type: "forex", "crypto", "stock", "index", "commodity"
-MARKETS = {
-    "EUR/USD": ("OANDA:EURUSD", "EURUSD=X", "forex"),
-    "GBP/USD": ("OANDA:GBPUSD", "GBPUSD=X", "forex"),
-    "USD/JPY": ("OANDA:USDJPY", "JPY=X", "forex"),  # note: yfinance uses JPY=X (USDJPY reversed sometimes)
-    "AUD/USD": ("OANDA:AUDUSD", "AUDUSD=X", "forex"),
-    "USD/CAD": ("OANDA:USDCAD", "CAD=X", "forex"),
-    "BTC/USD": ("BINANCE:BTCUSDT", "BTC-USD", "crypto"),
-    "ETH/USD": ("BINANCE:ETHUSDT", "ETH-USD", "crypto"),
-    "XAU/USD": ("OANDA:XAUUSD", "XAUUSD=X", "commodity"),
-    "NIFTY 50": ("NSE:NIFTY", "^NSEI", "index"),
-    "S&P 500": ("INDEX:SPX", "^GSPC", "index"),
+# --- Markets & TradingView embeds ---
+MARKET_YF = {
+    "EUR/USD": "EURUSD=X", "GBP/JPY": "GBPJPY=X", "USD/JPY": "JPY=X", "AUD/USD": "AUDUSD=X",
+    "XAU (Gold)": "GC=F", "Silver": "SI=F", "Oil WTI": "CL=F",
+    "BTC/USD": "BTC-USD", "ETH/USD": "ETH-USD",
+    "NIFTY 50": "^NSEI", "S&P 500": "^GSPC"
+}
+MARKET_TV = {
+    "EUR/USD": "OANDA:EURUSD", "GBP/JPY":"OANDA:GBPJPY", "USD/JPY":"OANDA:USDJPY", "AUD/USD":"OANDA:AUDUSD",
+    "XAU (Gold)":"OANDA:XAUUSD","Silver":"OANDA:XAGUSD","Oil WTI":"OANDA:WTICOUSD",
+    "BTC/USD":"BINANCE:BTCUSDT","ETH/USD":"BINANCE:ETHUSDT","NIFTY 50":"NSE:NIFTY","S&P 500":"INDEX:SPX"
 }
 
-# Timeframe mapping: user selects string -> yfinance interval, and lookback n bars
-TF_MAP = {
-    "1m": ("1m", 120),
-    "5m": ("5m", 240),
-    "15m": ("15m", 240),
-    "1h": ("60m", 240),
-    "1d": ("1d", 365),
-}
-
-# File for history
-HISTORY_FILE = "signal_history.csv"
-
-# ---------------------------
-# Utility functions
-# ---------------------------
-
-def ensure_history_file():
-    if not os.path.exists(HISTORY_FILE):
-        df = pd.DataFrame(columns=["timestamp","market","timeframe","signal","entry","sl","tp","rr","confidence","lot_size","notes"])
-        df.to_csv(HISTORY_FILE, index=False)
-
-def save_signal_to_history(row: dict):
-    ensure_history_file()
-    df = pd.read_csv(HISTORY_FILE)
-    df = df.append(row, ignore_index=True)
-    df.to_csv(HISTORY_FILE, index=False)
-
-@st.cache_data(ttl=30)
-def fetch_ohlc(ticker: str, interval: str, n_bars: int):
-    """
-    Fetch OHLC with yfinance. Returns DataFrame with columns: Open, High, Low, Close, Volume and index = Datetime
-    interval: yfinance interval string ("1m","5m","15m","60m","1d")
-    """
-    # yfinance requires period for minute intervals (e.g., '2d' for 1m)
-    # Calculate period from n_bars * interval approximate
-    if interval.endswith("m"):
-        # minutes
-        minutes = int(interval[:-1])
-        total_minutes = minutes * n_bars
-        if total_minutes <= 60:
-            period = "1d"
-        elif total_minutes <= 60*24:
-            period = "7d"
-        else:
-            period = "30d"
-    elif interval.endswith("h") or interval.endswith("60m"):
-        period = "60d"
-    else:
-        period = "1y"
-
-    try:
-        df = yf.download(tickers=ticker, period=period, interval=interval, progress=False, threads=False)
-        if df is None or df.empty:
-            return None
-        df = df.dropna()
-        # keep last n_bars
-        if len(df) > n_bars:
-            df = df.tail(n_bars)
-        return df
-    except Exception as e:
-        st.debug(f"yfinance error: {e}")
-        return None
-
-# ---------------------------
-# Indicator helpers
-# ---------------------------
-
-def ema(series: pd.Series, period: int):
-    return series.ewm(span=period, adjust=False).mean()
-
-def rsi(series: pd.Series, period: int = 14):
+# --- Utilities (indicators) ---
+def ema(series, n): return series.ewm(span=n, adjust=False).mean()
+def rsi(series, n=14):
     delta = series.diff()
-    up = delta.clip(lower=0)
-    down = -1 * delta.clip(upper=0)
-    ma_up = up.ewm(alpha=1/period, adjust=False).mean()
-    ma_down = down.ewm(alpha=1/period, adjust=False).mean()
-    rs = ma_up / (ma_down + 1e-9)
+    up = delta.clip(lower=0).ewm(alpha=1/n, adjust=False).mean()
+    down = -delta.clip(upper=0).ewm(alpha=1/n, adjust=False).mean()
+    rs = up / (down + 1e-9)
     return 100 - (100 / (1 + rs))
 
-def macd(series: pd.Series, fast=12, slow=26, signal=9):
-    ema_fast = ema(series, fast)
-    ema_slow = ema(series, slow)
-    macd_line = ema_fast - ema_slow
-    macd_signal = ema(macd_line, signal)
-    return macd_line, macd_signal
+# --- Fetch data (yfinance) ---
+@st.cache_data(ttl=15)
+def get_ohlc(yf_symbol, period="1d", interval="1m"):
+    try:
+        df = yf.download(tickers=yf_symbol, period=period, interval=interval, progress=False, threads=False)
+        if df is None or df.empty: return None
+        df = df.dropna().reset_index().rename(columns={"Datetime":"datetime"}) if "Datetime" in df.columns else df.reset_index()
+        df.rename(columns={df.columns[0]:"datetime"}, inplace=True)
+        return df
+    except Exception:
+        return None
 
-def bollinger_bands(series: pd.Series, period=20, std_mult=2):
-    ma = series.rolling(period).mean()
-    std = series.rolling(period).std()
-    upper = ma + std_mult * std
-    lower = ma - std_mult * std
-    return upper, lower
-
-# Candlestick pattern: engulfing (simple)
-def is_bullish_engulfing(df):
-    # needs at least 2 candles
-    if len(df) < 2:
-        return False
-    prev = df.iloc[-2]
-    cur = df.iloc[-1]
-    # prev red, cur green and cur body engulfs prev body
-    prev_body = abs(prev['Close'] - prev['Open'])
-    cur_body = abs(cur['Close'] - cur['Open'])
-    cond = (prev['Close'] < prev['Open']) and (cur['Close'] > cur['Open']) and (cur['Close'] - cur['Open'] > prev_body)
-    return bool(cond)
-
-def is_bearish_engulfing(df):
-    if len(df) < 2:
-        return False
-    prev = df.iloc[-2]
-    cur = df.iloc[-1]
-    prev_body = abs(prev['Close'] - prev['Open'])
-    cur_body = abs(cur['Close'] - cur['Open'])
-    cond = (prev['Close'] > prev['Open']) and (cur['Close'] < cur['Open']) and (cur['Open'] - cur['Close'] > prev_body)
-    return bool(cond)
-
-# ---------------------------
-# Core strategy / signal
-# ---------------------------
-
-def compute_indicators(df: pd.DataFrame):
-    close = df['Close']
+# --- Signal logic & risk calc ---
+def analyze(df):
     df = df.copy()
-    # EMAs
-    df['EMA8'] = ema(close, 8)
-    df['EMA20'] = ema(close, 20)
-    df['EMA50'] = ema(close, 50)
-    # RSI
-    df['RSI14'] = rsi(close, 14)
-    # MACD
-    macd_line, macd_signal = macd(close)
-    df['MACD'] = macd_line
-    df['MACD_SIGNAL'] = macd_signal
-    # Bollinger
-    upper, lower = bollinger_bands(close, 20, 2)
-    df['BB_UP'] = upper
-    df['BB_LOW'] = lower
-    return df
-
-def compute_master_signal(df: pd.DataFrame, df_htf: pd.DataFrame = None, market_type="forex"):
-    """
-    Returns dict with signal: BUY/SELL/WAIT, entry, sl, tp, confidence (0-100), reasons list
-    df: timeframe df (most recent)
-    df_htf: higher timeframe df for confirmation (optional)
-    """
-    reasons = []
-    sig_score = 0
+    df["EMA5"] = ema(df["Close"], 5)
+    df["EMA20"] = ema(df["Close"], 20)
+    df["RSI14"] = rsi(df["Close"], 14)
+    df["returns"] = df["Close"].pct_change()
+    vol = df["returns"].std() * 10000 if not df["returns"].isna().all() else 0
     last = df.iloc[-1]
-    close = last['Close']
+    prev = df.iloc[-2] if len(df) >= 2 else last
+    price = float(last["Close"])
+    prev_price = float(prev["Close"])
+    trend = "uptrend" if price > df["EMA20"].iloc[-1] else "downtrend"
+    momentum = "strong" if abs(price - prev_price) > (df["Close"].std() * 0.5 if df["Close"].std()>0 else 0.0005) else "weak"
+    return {"price":price,"prev_price":prev_price,"trend":trend,"momentum":momentum,"volatility":abs(vol),
+            "EMA5":float(last["EMA5"]),"EMA20":float(last["EMA20"]), "RSI":float(last["RSI14"])}
 
-    # trend via EMA50 and EMA20
-    trend = "up" if last['EMA20'] > last['EMA50'] else "down"
-
-    # momentum via EMA8 vs EMA20
-    momentum = "strong" if last['EMA8'] > last['EMA20'] and trend == "up" else ("strong" if last['EMA8'] < last['EMA20'] and trend == "down" else "weak")
-
-    # RSI filter
-    rsi_val = last['RSI14']
-    if rsi_val < 30:
-        reasons.append("RSI oversold")
-        sig_score += 5
-    elif rsi_val > 70:
-        reasons.append("RSI overbought")
-        sig_score += 5
-
-    # MACD
-    if last['MACD'] > last['MACD_SIGNAL']:
-        sig_score += 8
-        reasons.append("MACD bullish")
+def generate_signal(analysis, account_balance, risk_percent, market_name):
+    entry = analysis["price"]
+    signal = "WAIT"; reasons=[]
+    # Basic preserved Rayner-style logic
+    if analysis["trend"]=="uptrend" and analysis["momentum"]=="strong":
+        sl = entry - (analysis["volatility"]*0.0001 if analysis["volatility"]>0 else 0.001)
+        tp = entry + 3*(entry - sl)
+        signal="BUY"; reasons.append("Breakout confirmation in uptrend")
+    elif analysis["trend"]=="downtrend" and analysis["momentum"]=="strong":
+        sl = entry + (analysis["volatility"]*0.0001 if analysis["volatility"]>0 else 0.001)
+        tp = entry - 3*(sl - entry)
+        signal="SELL"; reasons.append("Breakout confirmation in downtrend")
     else:
-        sig_score += 0
+        sl, tp = None, None
 
-    # Candlestick
-    if is_bullish_engulfing(df):
-        sig_score += 12
-        reasons.append("Bullish engulfing")
-    if is_bearish_engulfing(df):
-        sig_score += 12
-        reasons.append("Bearish engulfing")
-
-    # Bollinger breakout
-    if close > last['BB_UP']:
-        sig_score += 7
-        reasons.append("Price above BB upper")
-    if close < last['BB_LOW']:
-        sig_score += 7
-        reasons.append("Price below BB lower")
-
-    # HTF confirmation
-    htf_confirm = False
-    if df_htf is not None:
-        df_htf = compute_indicators(df_htf)
-        last_htf = df_htf.iloc[-1]
-        if (trend == "up" and last_htf['EMA20'] > last_htf['EMA50']) or (trend == "down" and last_htf['EMA20'] < last_htf['EMA50']):
-            htf_confirm = True
-            sig_score += 10
-            reasons.append("Higher TF trend confirmed")
-
-    # final signal decision
-    # buy conditions
-    buy = False
-    sell = False
-    if trend == "up" and momentum == "strong" and (is_bullish_engulfing(df) or last['Close'] > last['EMA20']):
-        buy = True
-    if trend == "down" and momentum == "strong" and (is_bearish_engulfing(df) or last['Close'] < last['EMA20']):
-        sell = True
-
-    # require some minimal sig_score (tuneable)
-    confidence = min(100, max(10, int(sig_score * 4)))  # scale to 0-100
-
-    # If HTF enabled and not confirmed, lower confidence
-    if df_htf is not None and not htf_confirm:
-        confidence = int(confidence * 0.7)
-        reasons.append("Higher timeframe NOT confirmed")
-
-    # Compose signal and SL/TP (basic methodology)
-    signal = "WAIT"
-    entry = round(close, 5)
-    sl = None
-    tp = None
-
-    # Define pip/point logic
-    if market_type == "forex":
-        pip_unit = 0.0001 if not entry < 0.01 else 0.000001
-    elif market_type == "crypto":
-        pip_unit = 0.01 if entry > 1 else 0.0001
-    else:
-        pip_unit = 0.01
-
-    # Default risk distance: use recent ATR-like (stddev)
-    recent_std = df['Close'].diff().abs().rolling(10).mean().iloc[-5:]
-    # handle empty or NaN
-    if recent_std is None or recent_std.empty or recent_std.isna().all():
-        sl_distance = pip_unit * 30
-    else:
-        recent_std_val = recent_std.dropna().mean() if not recent_std.dropna().empty else pip_unit * 10
-        sl_distance = max(abs(recent_std_val) * 1.5, pip_unit * 10)
-
-    # set SL/TP based on direction
-    if buy:
-        signal = "BUY"
-        sl = round(entry - sl_distance, 5)
-        tp = round(entry + sl_distance * 3, 5)
-    elif sell:
-        signal = "SELL"
-        sl = round(entry + sl_distance, 5)
-        tp = round(entry - sl_distance * 3, 5)
-    else:
-        signal = "WAIT"
-
-    # final package
-    return {
-        "signal": signal,
-        "entry": entry,
-        "stop_loss": sl,
-        "take_profit": tp,
-        "confidence": confidence,
-        "reasons": reasons,
-    }
-
-# ---------------------------
-# Risk sizing
-# ---------------------------
-
-def calculate_lot_size(account_balance, risk_percent, entry, stop_loss, market_type="forex"):
-    """
-    For forex: 1 standard lot = 100,000 units base currency.
-    pip_value depends on pair; we approximate.
-    For crypto: return quantity units to buy
-    """
-    if stop_loss is None:
-        return 0
-    risk_amount = account_balance * (risk_percent / 100.0)
-    # price distance
-    dist = abs(entry - stop_loss)
-    if dist == 0:
-        return 0
-    # For forex approximate pip value: $10 per pip per lot for most major pairs (approx)
-    if market_type == "forex":
-        # lot_size = (risk_amount) / (pip_value * pip_distance)
-        # assume pip_value_per_lot = 10 USD per pip (for 1 lot)
-        pip_value_per_lot = 10.0
-        pip_distance = dist / 0.0001 if entry > 0.01 else dist / 0.000001
-        lot = (risk_amount) / (pip_value_per_lot * pip_distance + 1e-9)
-        lot = max(0, round(lot, 2))
-        return lot
-    else:
-        # For crypto/others, return asset quantity: qty = risk_amount / dist
-        qty = risk_amount / (dist + 1e-9)
-        qty = round(max(0, qty), 6)
-        return qty
-
-# ---------------------------
-# Chart drawing: candlestick + RR box
-# ---------------------------
-
-def plot_candles_with_rr(df: pd.DataFrame, entry=None, sl=None, tp=None):
-    """
-    Returns PNG image bytes of Matplotlib chart of last portion of df with rectangle for SL/TP
-    """
-    import matplotlib.dates as mdates
-    from matplotlib.patches import Rectangle
-
-    df_plot = df.copy().tail(60)  # last 60 bars
-    fig, ax = plt.subplots(figsize=(8, 4))
-    # plot candles (simple)
-    o = df_plot['Open'].values
-    h = df_plot['High'].values
-    l = df_plot['Low'].values
-    c = df_plot['Close'].values
-    dates = mdates.date2num(df_plot.index.to_pydatetime())
-
-    width = 0.0008 * (dates[-1] - dates[0]) * 100  # adaptive
-    for i in range(len(dates)):
-        color = 'green' if c[i] >= o[i] else 'red'
-        ax.plot([dates[i], dates[i]], [l[i], h[i]], color='black', linewidth=0.6)
-        ax.add_patch(Rectangle((dates[i]-width/2, min(o[i], c[i])),
-                               width, abs(c[i]-o[i]), facecolor=color, edgecolor=color, alpha=0.8))
-
-    ax.xaxis_date()
-    ax.set_title("Price + R/R Box")
-    ax.tick_params(axis='x', rotation=20)
-    ymin = df_plot['Low'].min()
-    ymax = df_plot['High'].max()
-    rng = ymax - ymin
-    ax.set_ylim(ymin - rng*0.1, ymax + rng*0.1)
-
-    # draw RR box if provided
-    if entry is not None and sl is not None and tp is not None:
-        # rectangle spanning recent timeframe (width)
-        x_left = dates[int(len(dates) * 0.2)]
-        x_width = dates[-1] - x_left
-        # top and bottom depending on direction
-        top = max(entry, sl, tp)
-        bottom = min(entry, sl, tp)
-        ax.add_patch(Rectangle((x_left, bottom), x_width, top-bottom, facecolor='blue', alpha=0.08, edgecolor='blue'))
-        # plot lines
-        ax.axhline(entry, color='blue', linestyle='--', linewidth=1, label='Entry')
-        ax.axhline(sl, color='red', linestyle='--', linewidth=1, label='SL')
-        ax.axhline(tp, color='green', linestyle='--', linewidth=1, label='TP')
-        ax.legend(loc='upper left')
-
-    buf = io.BytesIO()
-    plt.tight_layout()
-    fig.savefig(buf, format='png', dpi=90)
-    plt.close(fig)
-    buf.seek(0)
-    return buf.getvalue()
-
-# ---------------------------
-# Streamlit UI
-# ---------------------------
-
-st.set_page_config(layout="wide", page_title="Pro Signal Bot")
-
-st.title("📊 Pro Signal Bot — Basic Live Signal Helper")
-
-# Sidebar: account, settings
-with st.sidebar:
-    st.header("Account & Settings")
-    account_balance = st.number_input("Account Balance ($)", value=1000.0, min_value=1.0, step=10.0)
-    risk_percent = st.slider("Risk per trade (%)", min_value=0.1, max_value=5.0, value=1.0, step=0.1)
-    timeframe = st.selectbox("Chart timeframe", list(TF_MAP.keys()), index=0)
-    auto_refresh = st.number_input("Auto-refresh every N seconds (0=off)", value=0, min_value=0, step=1)
-    enable_htf = st.checkbox("Enable higher-timeframe confirmation (TF above selected)")
-    st.markdown("---")
-    st.markdown("Made for manual execution. No auto-trading included.")
-
-# main layout: left column for chart + controls, right column for signal info + history
-col1, col2 = st.columns([1.4, 1.0])
-
-with col1:
-    st.subheader("Live TradingView Chart")
-    # Market selection
-    market_choice = st.selectbox("Select Market", list(MARKETS.keys()), index=0)
-    tv_symbol = MARKETS[market_choice][0]
-    yf_ticker = MARKETS[market_choice][1]
-    market_type = MARKETS[market_choice][2]
-
-    # TradingView iframe
-    iframe_url = f"https://s.tradingview.com/widgetembed/?frameElementId=tradingview_{yf_ticker}&symbol={tv_symbol}&interval={timeframe}&hidesidetoolbar=1&theme=dark"
-    st.components.v1.iframe(iframe_url, height=520)
-
-    # Buttons
-    cols = st.columns([1,1,1])
-    if cols[0].button("🔄 Refresh Chart / Data (manual)"):
-        # just a trigger; we'll fetch below
-        st.experimental_rerun()
-    generate_pressed = cols[1].button("🔮 Generate Signal")
-    if cols[2].button("⭐ Add/Remove Favorite"):
-        # manage favorites in session_state
-        if "favorites" not in st.session_state:
-            st.session_state.favorites = []
-        if market_choice in st.session_state.favorites:
-            st.session_state.favorites.remove(market_choice)
-            st.success(f"Removed {market_choice} from favorites")
+    # Risk-sizing: approximate per market type
+    risk_amount = account_balance * (risk_percent/100.0)
+    lot_size = 0
+    rr_ratio = None
+    if sl and tp:
+        risk_per_unit = abs(entry - sl)
+        reward_per_unit = abs(tp - entry)
+        rr_ratio = round((reward_per_unit / (risk_per_unit + 1e-9)), 2)
+        # If Forex: pip-based lot calc assume 1 lot=100000 units; else crypto/indices treat unit-based
+        if market_name in ["EUR/USD","GBP/JPY","USD/JPY","AUD/USD"]:
+            # approximate pip unit = 0.0001 (JPY pairs 0.01)
+            pip_unit = 0.01 if "JPY" in market_name else 0.0001
+            units = risk_amount / (risk_per_unit) if risk_per_unit>0 else 0
+            lot_size = round(units / 100000, 4)  # standard lots
         else:
-            st.session_state.favorites.append(market_choice)
-            st.success(f"Added {market_choice} to favorites")
+            # for crypto/indices use units
+            lot_size = round((risk_amount / (risk_per_unit+1e-9)), 6)
+
+    # Confidence: base on volatility & RSI & momentum
+    confidence = min(200, int(50 + analysis["volatility"]*0.02 + (20 if analysis["momentum"]=="strong" else 0) + (10 if analysis["RSI"]<30 or analysis["RSI"]>70 else 0)))
+    return {"signal":signal,"entry":round(entry,6),"sl":round(sl,6) if sl else None,"tp":round(tp,6) if tp else None,
+            "risk_amount":round(risk_amount,2),"lot_size":lot_size,"rr":rr_ratio,"confidence":confidence,"reasons":reasons}
+
+# --- Persist history ---
+HISTORY_FILE = "signal_history.csv"
+def append_history(row:dict):
+    cols = ["timestamp","market","timeframe","signal","entry","sl","tp","confidence","rr","lot","risk_amount","notes"]
+    df = pd.DataFrame([row], columns=cols)
+    if os.path.exists(HISTORY_FILE):
+        df.to_csv(HISTORY_FILE, mode="a", header=False, index=False)
+    else:
+        df.to_csv(HISTORY_FILE, index=False)
+
+def read_history(n=20):
+    if not os.path.exists(HISTORY_FILE): return pd.DataFrame(columns=["timestamp","market","timeframe","signal","entry","sl","tp","confidence","rr","lot","risk_amount","notes"])
+    df = pd.read_csv(HISTORY_FILE)
+    return df.tail(n).reset_index(drop=True)
+
+# --- UI: Sidebar ---
+st.sidebar.title("Account & Settings")
+account_balance = st.sidebar.number_input("Account Balance ($)", min_value=1.0, value=1000.0, step=10.0, format="%.2f")
+risk_percent = st.sidebar.slider("Risk per trade (%)", min_value=0.1, max_value=5.0, value=1.0, step=0.1)
+tf = st.sidebar.selectbox("Chart timeframe", options=["1m","5m","15m","1h","1d"], index=0)
+auto_refresh = st.sidebar.number_input("Auto-refresh (sec, 0=off)", value=0, min_value=0, step=5)
+st.sidebar.markdown("Made for manual execution. No auto-trading included.")
+
+# favorites
+if "favorites" not in st.session_state: st.session_state.favorites = ["EUR/USD","BTC/USD"]
+# high movement (computed later)
+
+# --- Main layout ---
+col1, col2 = st.columns([1,1.4])
+with col1:
+    st.header("📈 Markets")
+    market = st.selectbox("Select Market", list(MARKET_YF.keys()), index=0)
+    # favorite toggle
+    fav_col1, fav_col2 = st.columns([6,1])
+    with fav_col1: st.write(f"Selected: **{market}**")
+    with fav_col2:
+        if st.button("★" if market in st.session_state.favorites else "☆"):
+            if market in st.session_state.favorites: st.session_state.favorites.remove(market)
+            else: st.session_state.favorites.append(market)
+
+    # TradingView chart embed (visual only)
+    tv_sym = MARKET_TV.get(market, "")
+    if tv_sym:
+        st.components.v1.iframe(f"https://s.tradingview.com/widgetembed/?symbol={tv_sym}&interval={tf}&theme=dark", height=480)
+    else:
+        st.info("TradingView symbol not available for this market.")
 
     st.markdown("---")
-    st.write("Favorites:")
-    if "favorites" not in st.session_state:
-        st.session_state.favorites = []
-    if st.session_state.favorites:
-        for f in st.session_state.favorites:
-            st.write(f"- {f}")
-    else:
-        st.write("No favorites yet")
+    if st.button("🔄 Refresh Chart / Data (manual)"):
+        st.experimental_rerun()
 
 with col2:
-    st.subheader("Signal Summary")
-    status_placeholder = st.empty()
-    result_placeholder = st.empty()
-    history_placeholder = st.empty()
-
-# Fetch OHLC
-interval, default_bars = TF_MAP[timeframe]
-n_bars = default_bars
-
-status_placeholder.info("Fetching OHLC data...")
-df = fetch_ohlc(yf_ticker, interval, n_bars)
-if df is None or df.empty:
-    status_placeholder.error("Unable to fetch live OHLC data for the selected market/timeframe. Try a different timeframe or market.")
-    st.stop()
-
-# Compute indicators for selected TF
-df_ind = compute_indicators(df)
-
-# Get HTF if enabled
-df_htf = None
-if enable_htf:
-    # pick higher timeframe: if 1m -> 5m, 5m->15m, 15m->1h, 1h->4h (approx) else skip
-    htf_map = {
-        "1m": "5m",
-        "5m": "15m",
-        "15m": "1h",
-        "1h": "4h",
-        "1d": "5d"
-    }
-    if timeframe in htf_map:
-        htf_tf = htf_map[timeframe]
-        if htf_tf in TF_MAP:
-            interval_htf, bars_htf = TF_MAP.get(htf_tf, ("15m", 240))
-        else:
-            # fallback
-            interval_htf = htf_tf
-            bars_htf = 240
-        df_htf = fetch_ohlc(yf_ticker, interval_htf, bars_htf)
-        if df_htf is not None and not df_htf.empty:
-            df_htf = compute_indicators(df_htf)
+    st.header("🔎 Signal Summary")
+    with st.spinner("Fetching data..."):
+        yf_sym = MARKET_YF.get(market)
+        interval_map = {"1m":"1m","5m":"5m","15m":"15m","1h":"60m","1d":"1d"}
+        yf_interval = interval_map.get(tf,"1m")
+        # yfinance uses period; for 1m need '1d' period typically
+        period_map = {"1m":"1d","5m":"5d","15m":"30d","1h":"90d","1d":"365d"}
+        period = period_map.get(tf,"1d")
+        df = get_ohlc(yf_sym, period=period, interval=yf_interval)
+    if df is None or df.empty:
+        st.error("Unable to fetch live OHLC data for the selected market/timeframe. Try again or pick a different timeframe.")
     else:
-        df_htf = None
+        analysis = analyze(df)
+        st.metric("Price", f"{analysis['price']:.6f}")
+        st.write(f"Trend: **{analysis['trend']}**  |  Momentum: **{analysis['momentum']}**  |  Volatility: **{analysis['volatility']:.2f}**")
+        st.write(f"EMA5: {analysis['EMA5']:.6f}  EMA20: {analysis['EMA20']:.6f}  RSI: {analysis['RSI']:.2f}")
 
-status_placeholder.success("Data fetched. Running analysis...")
+        if st.button("🔮 Generate Signal"):
+            sig = generate_signal(analysis, account_balance, risk_percent, market)
+            st.success(f"Signal: {sig['signal']}  |  Confidence: {sig['confidence']}%")
+            st.write(f"Entry: {sig['entry']}  |  SL: {sig['sl']}  |  TP: {sig['tp']}")
+            st.write(f"Risk ${sig['risk_amount']}  |  Lot Size: {sig['lot_size']}  |  R:R: {sig['rr']}")
+            if sig["reasons"]: st.write("Reasons:", ", ".join(sig["reasons"]))
+            # Notification for large R:R with high confidence
+            if sig["rr"] and sig["rr"] >= 6 and sig["confidence"] >= 110:
+                st.balloons()
+                st.warning(f"HIGH R:R {sig['rr']} with confidence {sig['confidence']}%")
+            # append history
+            row = {
+                "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                "market": market, "timeframe": tf, "signal": sig["signal"],
+                "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
+                "confidence": sig["confidence"], "rr": sig["rr"], "lot": sig["lot_size"],
+                "risk_amount": sig["risk_amount"], "notes": "|".join(sig["reasons"])
+            }
+            append_history(row)
 
-# If generate_pressed or auto-refresh triggered, compute signal
-if generate_pressed or (auto_refresh > 0 and st.experimental_get_query_params().get("last_refresh")):
-    pass  # we'll compute below
+    st.markdown("---")
+    st.subheader("📋 Recent Signals")
+    history = read_history(10)
+    st.dataframe(history if not history.empty else pd.DataFrame({"info":["No history yet"]}), use_container_width=True)
 
-# Compute master signal (every render)
-sig = compute_master_signal(df_ind, df_htf, market_type=market_type)
-# calculate lot size
-lot_size = calculate_lot_size(account_balance, risk_percent, sig['entry'], sig['stop_loss'], market_type=market_type)
-sig['lot_size'] = lot_size
+# --- Top movers (simple heuristic) ---
+try:
+    movers = {}
+    for m, sym in MARKET_YF.items():
+        d = get_ohlc(sym, period="1d", interval="5m")
+        if d is None or d.empty: continue
+        movers[m] = abs(d["Close"].pct_change().tail(6).sum())
+    top = sorted(movers.items(), key=lambda x: x[1], reverse=True)[:5]
+    st.sidebar.subheader("🔥 Top Movers")
+    for name, score in top:
+        st.sidebar.write(f"{name}: {score:.4f}")
+except Exception:
+    st.sidebar.info("Top movers unavailable")
 
-# Show results
-with result_placeholder.container():
-    st.markdown(f"**Market:** {market_choice}  |  **TF:** {timeframe}")
-    st.markdown(f"**Signal:**   :blue[{sig['signal']}]   |   **Confidence:** {sig['confidence']}%")
-    st.progress(min(100, max(0, sig['confidence'])))
-    st.write(f"Entry: {sig['entry']}   |   SL: {sig['stop_loss']}   |   TP: {sig['take_profit']}")
-    rr = None
-    if sig['stop_loss'] and sig['take_profit']:
-        risk = abs(sig['entry'] - sig['stop_loss'])
-        reward = abs(sig['take_profit'] - sig['entry'])
-        rr = round((reward / risk) if risk != 0 else 0, 2)
-        st.write(f"Risk: {round(risk,6)}  |  Reward: {round(reward,6)}  |  R:R = {rr}:1")
-    st.write(f"Recommended lot / qty: {sig['lot_size']}")
-    if sig['reasons']:
-        st.markdown("**Reasons:**")
-        for r in sig['reasons']:
-            st.write(f"- {r}")
+# --- Download history button ---
+if os.path.exists(HISTORY_FILE):
+    with open(HISTORY_FILE, "rb") as f:
+        b = f.read()
+    st.sidebar.download_button("Download signal_history.csv", data=b, file_name="signal_history.csv", mime="text/csv")
 
-    # draw chart with rr box
-    try:
-        img_bytes = plot_candles_with_rr(df, entry=sig['entry'], sl=sig['stop_loss'], tp=sig['take_profit'])
-        st.image(img_bytes, use_column_width=True)
-    except Exception as e:
-        st.warning("Failed to render R/R chart image.")
-
-    # Save to history button
-    if st.button("💾 Save Signal to History"):
-        row = {
-            "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-            "market": market_choice,
-            "timeframe": timeframe,
-            "signal": sig['signal'],
-            "entry": sig['entry'],
-            "sl": sig['stop_loss'],
-            "tp": sig['take_profit'],
-            "rr": rr,
-            "confidence": sig['confidence'],
-            "lot_size": sig['lot_size'],
-            "notes": ";".join(sig['reasons'])
-        }
-        save_signal_to_history(row)
-        st.success("Signal saved to history.")
-
-# Show signal history live
-ensure_history_file()
-hist_df = pd.read_csv(HISTORY_FILE)
-with history_placeholder.container():
-    st.subheader("Recent History")
-    if hist_df is None or hist_df.empty:
-        st.info("No saved signal history yet.")
-    else:
-        st.dataframe(hist_df.tail(20).sort_values("timestamp", ascending=False))
-
-# Auto refresh logic (optional)
+# --- Auto-refresh (simple) ---
 if auto_refresh and auto_refresh > 0:
-    st.experimental_set_query_params(last_refresh=int(time.time()))
-    time.sleep(auto_refresh)
+    st.experimental_set_query_params(_refresh=datetime.utcnow().timestamp())
     st.experimental_rerun()
-
-st.caption("Note: This bot is a signal helper. Always validate signals on your own charts and risk-manage trades.")
