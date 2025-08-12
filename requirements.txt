@@ -1,11 +1,2 @@
 streamlit
 pandas
-numpy
-selenium
-requests
-beautifulsoup4
-tradingview_ta
-pytz
-tvdatafeed
-Pillow
-plotly
